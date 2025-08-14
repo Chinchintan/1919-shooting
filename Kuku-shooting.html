@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>九九シューティング（19×19対応）</title>
+<style>
+  :root{ --ui-bg: rgba(255,255,255,.95); }
+  html, body { margin: 0; padding: 0; height: 100%; background: #fffbf0; color: #333; font-family: 'Comic Sans MS', 'Hiragino Kaku Gothic ProN', Meiryo, sans-serif; overscroll-behavior: contain; }
+  /* キャンバス */
+  #game { display: block; margin: 0 auto; background: linear-gradient(#b3e5fc, #e1f5fe); border: 4px solid #ffcc80; border-radius: 12px; touch-action: none; }
+  /* 画面下のUI(式・設定) を見やすく固定 */
+  #ui { position: fixed; bottom: 80px; left: 0; right: 0; background: var(--ui-bg); padding: 8px 10px; text-align: center; z-index: 20; font-size: 14px; box-shadow: 0 -2px 6px rgba(0,0,0,.08); border-top: 2px solid #ffcc80; }
+  #problem { font-size: clamp(28px, 8vw, 40px); font-weight: 900; color: #ff7043; letter-spacing: .5px; text-shadow: 0 1px 0 #fff6; margin-bottom: 4px; }
+  #feedback { font-size: 18px; font-weight: bold; min-height: 22px; margin-bottom: 6px; opacity: 0; transition: opacity 0.2s; }
+  .feedback-show { opacity: 1 !important; }
+  .bar { display: inline-flex; align-items: center; gap: 6px; margin: 4px; }
+  label { font-weight: 700; }
+  button, select { font-size: 14px; }
+  /* 画面下の操作ボタン */
+  #controls { position: fixed; bottom: 8px; left: 0; right: 0; display: flex; justify-content: center; gap: 10px; z-index: 20; pointer-events: none; }
+  .control-btn { pointer-events: auto; width: 64px; height: 64px; font-size: 22px; background: #fff59d; border: 2px solid #fbc02d; border-radius: 50%; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.2); display: grid; place-items: center; user-select: none; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="game" width="360" height="520"></canvas>
+
+<div id="ui">
+  <div id="problem">— × — ＝ ?</div>
+  <div id="feedback"></div>
+  <div>
+    <span class="bar"><label for="modeSel">出題</label>
+      <select id="modeSel">
+        <option value="one">1桁（1×1〜9×9）</option>
+        <option value="dan9">九の段</option>
+        <option value="dan8">八の段</option>
+        <option value="full" selected>〜19まで</option>
+      </select>
+    </span>
+    <span class="bar"><label for="fallSpeedSel">落下速度</label>
+      <select id="fallSpeedSel">
+        <option value="0.8">とてもゆっくり</option>
+        <option value="1.2">ゆっくり</option>
+        <option value="1.6" selected>ふつう</option>
+        <option value="2.2">はやい</option>
+      </select>
+    </span>
+    <span class="bar"><label for="levelSel">レベル</label>
+      <select id="levelSel">
+        <option value="easy">かんたん</option>
+        <option value="normal" selected>ふつう</option>
+        <option value="hard">むずかしい</option>
+      </select>
+    </span>
+    <button id="startBtn">スタート</button>
+  </div>
+  <div>スコア: <span id="score">0</span> / ライフ: <span id="lives">3</span></div>
+</div>
+
+<div id="controls">
+  <button id="leftBtn" class="control-btn">◀</button>
+  <button id="shootBtn" class="control-btn">●</button>
+  <button id="rightBtn" class="control-btn">▶</button>
+</div>
+
+<script>
+(function(){
+  // ==== 要素 ====
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const problemEl = document.getElementById('problem');
+  const feedbackEl = document.getElementById('feedback');
+  const scoreEl = document.getElementById('score');
+  const livesEl = document.getElementById('lives');
+  const startBtn = document.getElementById('startBtn');
+  const leftBtn = document.getElementById('leftBtn');
+  const rightBtn = document.getElementById('rightBtn');
+  const shootBtn = document.getElementById('shootBtn');
+  const modeSel = document.getElementById('modeSel');
+  const fallSpeedSel = document.getElementById('fallSpeedSel');
+  const levelSel = document.getElementById('levelSel');
+
+  // ==== 状態 ====
+  let running = false, score = 0, lives = 3;
+  let bullets = [], orbs = [];
+  let playerX = 160; // CSS px
+  let problem = {};
+  let keys = {};
+  let mode = modeSel.value;                 // 出題範囲
+  let fallSpeed = parseFloat(fallSpeedSel.value); // 落下速度（独立）
+  let level = levelSel.value;               // 難易度（弾速・選択肢数・オーブ大きさ）
+  let logicalW = 360, logicalH = 520;       // 描画の論理サイズ（CSS px）
+  let nextQueued = false;                   // 多重出題のガード
+
+  // ==== リサイズ（UI/ボタンの高さも考慮） ====
+  function resize(){
+    const DPR = window.devicePixelRatio || 1;
+    const uiH = document.getElementById('ui').clientHeight;
+    const ctrlH = document.getElementById('controls').clientHeight;
+    logicalW = Math.min(420, Math.max(300, window.innerWidth - 16));
+    logicalH = Math.min(640, Math.max(340, window.innerHeight - uiH - ctrlH - 16));
+    canvas.style.width = logicalW + 'px';
+    canvas.style.height = logicalH + 'px';
+    canvas.width = Math.floor(logicalW * DPR);
+    canvas.height = Math.floor(logicalH * DPR);
+    // 以後はCSSピクセル座標で描画
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+    playerX = Math.max(26, Math.min(logicalW - 26, playerX));
+  }
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', ()=> setTimeout(resize, 200));
+  resize();
+
+  // ==== 出題範囲 ====
+  function getRange(){
+    if (mode === 'dan9') return { aMin:9, aMax:9, bMin:1, bMax:9 };
+    if (mode === 'dan8') return { aMin:8, aMax:8, bMin:1, bMax:9 };
+    if (mode === 'one')  return { aMin:1, aMax:9, bMin:1, bMax:9 };
+    return { aMin:1, aMax:19, bMin:1, bMax:19 };
+  }
+  function getMaxProduct(){ const r = getRange(); return r.aMax * r.bMax; }
+
+  // ==== レベルパラメータ（選択肢・弾速・オーブ半径） ====
+  function getLevelParams(){
+    switch(level){
+      case 'easy':   return { choices: 4, bullet: 5,  orbR: 20 };
+      case 'hard':   return { choices: 6, bullet: 7,  orbR: 16 };
+      default:       return { choices: 5, bullet: 6,  orbR: 18 };
+    }
+  }
+
+  // ==== フィードバック ====
+  function showFeedback(text, color){
+    feedbackEl.textContent = text;
+    feedbackEl.style.color = color;
+    feedbackEl.classList.add('feedback-show');
+    clearTimeout(showFeedback._t);
+    showFeedback._t = setTimeout(()=> feedbackEl.classList.remove('feedback-show'), 800);
+  }
+
+  // ==== 新しい問題 ====
+  function newProblem(){
+    nextQueued = false;
+    const r = getRange();
+    const a = r.aMin + Math.floor(Math.random() * (r.aMax - r.aMin + 1));
+    const b = r.bMin + Math.floor(Math.random() * (r.bMax - r.bMin + 1));
+    const ans = a * b;
+    problem = { a, b, ans };
+    problemEl.textContent = `${a} × ${b} ＝ ?`;
+
+    const {choices, orbR} = getLevelParams();
+    const maxP = getMaxProduct();
+    const answers = new Set([ans]);
+    while (answers.size < choices) {
+      const v = 1 + Math.floor(Math.random() * maxP);
+      if (v !== ans) answers.add(v);
+    }
+    const list = [...answers].sort(()=> Math.random() - 0.5);
+
+    orbs = [];
+    const spacing = logicalW / (list.length + 1);
+    list.forEach((val, i) => {
+      orbs.push({ x: spacing * (i+1), y: -40 - Math.random()*140, r: orbR, val, correct: val===ans, color:'#ffcc80', dead:false });
+    });
+  }
+
+  // ==== ゲームループ ====
+  function startGame(){ running = true; score = 0; lives = 3; bullets.length = 0; newProblem(); requestAnimationFrame(loop); showFeedback('スタート！','#1976d2'); }
+  function loop(){ if (!running) return; update(); draw(); requestAnimationFrame(loop); }
+
+  function update(){
+    // 横移動
+    if (keys['ArrowLeft'])  playerX -= 4;
+    if (keys['ArrowRight']) playerX += 4;
+    playerX = Math.max(26, Math.min(logicalW - 26, playerX));
+
+    // 弾（レベル依存の速度）
+    const {bullet} = getLevelParams();
+    for (let i=bullets.length-1; i>=0; i--){ bullets[i].y -= bullet; if (bullets[i].y < -10) bullets.splice(i,1); }
+
+    // オーブ落下（落下速度はセレクトで独立制御）
+    for (let i=orbs.length-1; i>=0; i--){
+      const o = orbs[i]; o.y += fallSpeed;
+      if (o.y > logicalH + 24){
+        if (o.correct){ lives--; livesEl.textContent = lives; showFeedback('おちちゃった…','red'); if (lives<=0) running=false; }
+        newProblem();
+        break;
+      }
+    }
+
+    // 衝突
+    for (let bi=bullets.length-1; bi>=0; bi--){
+      const b = bullets[bi];
+      for (let oi=orbs.length-1; oi>=0; oi--){
+        const o = orbs[oi]; if (o.dead) continue;
+        const dx=b.x-o.x, dy=b.y-o.y, R=o.r+4;
+        if (dx*dx + dy*dy <= R*R){
+          bullets.splice(bi,1);
+          if (o.correct){
+            o.color='#81c784'; o.dead=true; score+=10; scoreEl.textContent=score; showFeedback('せいかい！','green');
+            if (!nextQueued){ nextQueued=true; setTimeout(newProblem, 500); }
+          }else{
+            o.dead=true; lives--; livesEl.textContent=lives; showFeedback('ちがうよ','red'); if (lives<=0) running=false;
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  // ==== 描画 ====
+  function drawChick(x, y){
+    ctx.save(); ctx.translate(x, y);
+    // ひよこ（頭）
+    ctx.fillStyle='#ffe466'; ctx.strokeStyle='#e6b800'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.arc(0, -8, 12, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+    // からだ
+    ctx.beginPath(); ctx.ellipse(0, 8, 16, 12, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+    // 目
+    ctx.fillStyle='#333'; ctx.beginPath(); ctx.arc(-4, -10, 1.5, 0, Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(4, -10, 1.5, 0, Math.PI*2); ctx.fill();
+    // くちばし
+    ctx.fillStyle='#ffa040'; ctx.beginPath(); ctx.moveTo(0, -6); ctx.lineTo(4, -4); ctx.lineTo(0, -2); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  function draw(){
+    ctx.clearRect(0, 0, logicalW, logicalH);
+    drawChick(playerX, logicalH - 44);
+    ctx.fillStyle='#f48fb1'; bullets.forEach(b => ctx.fillRect(b.x-2, b.y-8, 4, 8));
+    ctx.font='14px Comic Sans MS'; ctx.textAlign='center';
+    orbs.forEach(o => { if (o.dead) return; ctx.fillStyle=o.color; ctx.beginPath(); ctx.arc(o.x, o.y, o.r, 0, Math.PI*2); ctx.fill(); ctx.fillStyle='#000'; ctx.fillText(o.val, o.x, o.y+5); });
+  }
+
+  // ==== 入力 ====
+  function shoot(){ bullets.push({ x: playerX, y: logicalH - 54 }); }
+  document.addEventListener('keydown', e => { if (e.repeat) return; keys[e.key] = true; if (e.key === ' ') { e.preventDefault(); shoot(); } });
+  document.addEventListener('keyup', e => { keys[e.key] = false; });
+
+  // 画面ボタン 長押し対応
+  function holdPress(el, onDown, onUp){
+    const down = ev => { ev.preventDefault(); onDown(); };
+    const up   = ev => { ev.preventDefault(); onUp(); };
+    el.addEventListener('pointerdown', down);
+    window.addEventListener('pointerup', up);
+    el.addEventListener('touchstart', down, {passive:false});
+    window.addEventListener('touchend', up, {passive:false});
+    window.addEventListener('touchcancel', up, {passive:false});
+  }
+  holdPress(leftBtn,  ()=> keys['ArrowLeft']=true,  ()=> keys['ArrowLeft']=false);
+  holdPress(rightBtn, ()=> keys['ArrowRight']=true, ()=> keys['ArrowRight']=false);
+  shootBtn.addEventListener('pointerdown', e=>{ e.preventDefault(); shoot(); });
+  shootBtn.addEventListener('touchstart', e=>{ e.preventDefault(); shoot(); }, {passive:false});
+
+  // キャンバス上ドラッグで移動
+  let dragging=false;
+  function moveTo(clientX){ const rect=canvas.getBoundingClientRect(); playerX=Math.max(26, Math.min(rect.width-26, clientX-rect.left)); }
+  canvas.addEventListener('pointerdown', e=>{ dragging=true; moveTo(e.clientX); });
+  canvas.addEventListener('pointermove', e=>{ if(dragging){ e.preventDefault(); moveTo(e.clientX); } });
+  window.addEventListener('pointerup', ()=> dragging=false);
+
+  // セレクター（変更時の即時反映）
+  startBtn.addEventListener('click', startGame);
+  startBtn.addEventListener('touchend', (e)=>{ e.preventDefault(); startGame(); }, {passive:false});
+  modeSel.addEventListener('change', ()=>{ mode = modeSel.value; if (running) newProblem(); });
+  fallSpeedSel.addEventListener('change', ()=>{ fallSpeed = parseFloat(fallSpeedSel.value); showFeedback('速度: '+ fallSpeedSel.options[fallSpeedSel.selectedIndex].text, '#6d4c41'); });
+  levelSel.addEventListener('change', ()=>{ level = levelSel.value; showFeedback('レベル: '+ levelSel.options[levelSel.selectedIndex].text, '#6d4c41'); if (running) newProblem(); });
+})();
+</script>
+</body>
+</html>
